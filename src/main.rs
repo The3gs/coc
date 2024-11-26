@@ -1,11 +1,13 @@
+mod intern;
+
 use std::{collections::HashMap, io::Write, rc::Rc, sync::atomic::AtomicU32};
 
 #[derive(Debug, PartialEq, Eq)]
 enum Term {
     Type,
-    Var(String),
-    Fun(String, Rc<Term>),
-    FunT(String, Rc<Term>, Rc<Term>),
+    Var(intern::Token),
+    Fun(intern::Token, Rc<Term>),
+    FunT(intern::Token, Rc<Term>, Rc<Term>),
     App(Rc<Term>, Rc<Term>),
 
     Annotation(Rc<Term>, Rc<Term>),
@@ -13,24 +15,29 @@ enum Term {
 
 enum Value {
     Type,
-    Fun(String, HashMap<String, Rc<Value>>, Rc<Term>),
-    FunT(Rc<Value>, String, HashMap<String, Rc<Value>>, Rc<Term>),
+    Fun(intern::Token, HashMap<intern::Token, Rc<Value>>, Rc<Term>),
+    FunT(
+        Rc<Value>,
+        intern::Token,
+        HashMap<intern::Token, Rc<Value>>,
+        Rc<Term>,
+    ),
     Normal(Rc<Value>, Rc<NormalForm>),
 }
 
 enum NormalForm {
     App(Rc<NormalForm>, (Rc<Value>, Rc<Value>)),
-    Var(String),
+    Var(intern::Token),
 }
 
 fn val_closure(
-    name: &String,
-    env: &HashMap<String, Rc<Value>>,
+    name: intern::Token,
+    env: &HashMap<intern::Token, Rc<Value>>,
     body: &Rc<Term>,
     arg: Rc<Value>,
 ) -> Rc<Value> {
     let mut new_env = env.clone();
-    new_env.insert(name.clone(), arg);
+    new_env.insert(name, arg);
     body.eval(&new_env)
 }
 
@@ -40,8 +47,8 @@ fn gensym() -> u32 {
 }
 
 fn ctx_to_env(
-    input: HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
-) -> HashMap<String, Rc<Value>> {
+    input: HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
+) -> HashMap<intern::Token, Rc<Value>> {
     input
         .into_iter()
         .map(|(name, (typ, val))| {
@@ -58,7 +65,7 @@ fn ctx_to_env(
 }
 
 impl Term {
-    fn eval(self: &Rc<Self>, env: &HashMap<String, Rc<Value>>) -> Rc<Value> {
+    fn eval(self: &Rc<Self>, env: &HashMap<intern::Token, Rc<Value>>) -> Rc<Value> {
         match self.as_ref() {
             Term::Type => Rc::new(Value::Type),
             Term::Var(s) => env.get(s).unwrap().clone(),
@@ -85,8 +92,8 @@ impl Term {
     fn alpha_equiv_aux(
         &self,
         other: &Self,
-        self_vars: Vec<(String, u32)>,
-        other_vars: Vec<(String, u32)>,
+        self_vars: Vec<(intern::Token, u32)>,
+        other_vars: Vec<(intern::Token, u32)>,
     ) -> bool {
         match (self, other) {
             (Term::Var(a), Term::Var(b)) => match (
@@ -107,10 +114,10 @@ impl Term {
                 let id = gensym();
                 let mut bigger0 = Vec::new();
                 bigger0.push((name0.clone(), id));
-                bigger0.extend(self_vars.into_iter());
+                bigger0.extend(self_vars);
                 let mut bigger1 = Vec::new();
                 bigger1.push((name1.clone(), id));
-                bigger1.extend(other_vars.into_iter());
+                bigger1.extend(other_vars);
                 body0.alpha_equiv_aux(body1, bigger0, bigger1)
             }
             (Term::FunT(name0, arg_t0, ret_t0), Term::FunT(name1, arg_t1, ret_t1)) => {
@@ -130,7 +137,7 @@ impl Term {
 
     fn synth(
         self: &Rc<Self>,
-        ctx: &HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
+        ctx: &HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
     ) -> Option<(Rc<Term>, Rc<Term>)> {
         match self.as_ref() {
             Term::Type => Some((self.clone(), self.clone())),
@@ -162,7 +169,7 @@ impl Term {
                     Value::FunT(arg_t, name, env, ret_t) => {
                         let arg_out = arg.check(&arg_t.clone(), ctx)?;
                         Some((
-                            val_closure(name, env, ret_t, arg_out.eval(&ctx_to_env(ctx.clone())))
+                            val_closure(*name, env, ret_t, arg_out.eval(&ctx_to_env(ctx.clone())))
                                 .read_back(&Rc::new(Value::Type), ctx),
                             Rc::new(Term::App(fun_out, arg_out)),
                         ))
@@ -183,7 +190,7 @@ impl Term {
     fn check(
         self: &Rc<Self>,
         typ: &Rc<Value>,
-        ctx: &HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
+        ctx: &HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
     ) -> Option<Rc<Term>> {
         match self.as_ref() {
             Term::Fun(name0, body) => match typ.as_ref() {
@@ -193,7 +200,7 @@ impl Term {
                         Rc::new(NormalForm::Var(name0.clone())),
                     ));
                     let body_out = body.check(
-                        &val_closure(name1, env, ret_t, x_val),
+                        &val_closure(*name1, env, ret_t, x_val),
                         &extend(ctx, name0.clone(), (arg_t.clone(), None)),
                     )?;
                     Some(Rc::new(Term::Fun(name0.clone(), body_out)))
@@ -212,15 +219,19 @@ impl Term {
     }
 }
 
-fn fresh_in<T>(name: &String, env: &HashMap<String, T>) -> String {
-    let mut name = name.clone();
-    while env.get(&name).is_some() {
+fn fresh_in<T>(name: intern::Token, env: &HashMap<intern::Token, T>) -> intern::Token {
+    let mut name = name.get_arc().as_ref().to_owned();
+    while env.get(&intern::intern(&name).0).is_some() {
         name.push('*');
     }
-    name
+    intern::intern(&name).0
 }
 
-fn extend<T: Clone>(ctx: &HashMap<String, T>, name: String, t: T) -> HashMap<String, T> {
+fn extend<T: Clone>(
+    ctx: &HashMap<intern::Token, T>,
+    name: intern::Token,
+    t: T,
+) -> HashMap<intern::Token, T> {
     let mut new = ctx.clone();
     new.insert(name, t);
     new
@@ -229,10 +240,10 @@ fn extend<T: Clone>(ctx: &HashMap<String, T>, name: String, t: T) -> HashMap<Str
 impl Value {
     fn do_app(self: &Rc<Self>, arg: Rc<Self>) -> Rc<Self> {
         match self.as_ref() {
-            Value::Fun(name, env, body) => val_closure(name, env, body, arg),
+            Value::Fun(name, env, body) => val_closure(*name, env, body, arg),
             Value::Normal(norm_t, norm) => match norm_t.as_ref() {
                 Value::FunT(arg_t, name, env, ret_t_body) => Rc::new(Value::Normal(
-                    val_closure(name, env, ret_t_body, arg.clone()),
+                    val_closure(*name, env, ret_t_body, arg.clone()),
                     Rc::new(NormalForm::App(norm.clone(), (arg_t.clone(), arg))),
                 )),
                 _ => panic!("Invalid do_app call"),
@@ -244,11 +255,11 @@ impl Value {
     fn read_back(
         self: &Rc<Value>,
         self_t: &Rc<Value>,
-        ctx: &HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
+        ctx: &HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
     ) -> Rc<Term> {
         match (self_t.as_ref(), self.as_ref()) {
-            (Value::FunT(arg_t, name, env, ret_t), f) => {
-                let fresh_name = fresh_in(name, ctx);
+            (Value::FunT(arg_t, name, env, ret_t), _) => {
+                let fresh_name = fresh_in(*name, ctx);
                 let fresh_name_val = Rc::new(Value::Normal(
                     arg_t.clone(),
                     Rc::new(NormalForm::Var(fresh_name.clone())),
@@ -257,19 +268,19 @@ impl Value {
                 Rc::new(Term::Fun(
                     fresh_name.clone(),
                     self.do_app(fresh_name_val.clone()).read_back(
-                        &val_closure(name, env, ret_t, fresh_name_val),
+                        &val_closure(*name, env, ret_t, fresh_name_val),
                         &extend(ctx, fresh_name, (arg_t.clone(), None)),
                     ),
                 ))
             }
             (Value::Type, Value::Type) => Rc::new(Term::Type),
             (Value::Type, Value::FunT(arg_t, name, env, ret_t)) => {
-                let fresh_name = fresh_in(name, ctx);
+                let fresh_name = fresh_in(*name, ctx);
                 Rc::new(Term::FunT(
                     fresh_name.clone(),
                     arg_t.read_back(&Rc::new(Value::Type), ctx),
                     val_closure(
-                        name,
+                        *name,
                         env,
                         ret_t,
                         Rc::new(Value::Normal(
@@ -283,14 +294,14 @@ impl Value {
                     ),
                 ))
             }
-            (_, Value::Normal(t, ne)) => ne.read_back(ctx),
+            (_, Value::Normal(_, ne)) => ne.read_back(ctx),
             _ => panic!("Error reading back value"),
         }
     }
 
     fn convert(
         self: &Rc<Value>,
-        ctx: &HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
+        ctx: &HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
         a: &Rc<Value>,
         b: &Rc<Value>,
     ) -> bool {
@@ -303,7 +314,7 @@ impl Value {
 impl NormalForm {
     fn read_back(
         self: &Rc<Self>,
-        ctx: &HashMap<String, (Rc<Value>, Option<Rc<Value>>)>,
+        ctx: &HashMap<intern::Token, (Rc<Value>, Option<Rc<Value>>)>,
     ) -> Rc<Term> {
         match self.as_ref() {
             NormalForm::App(ne, (arg_t, arg)) => {
@@ -321,7 +332,7 @@ enum Token {
     OpenParen,
     CloseParen,
     Colon,
-    Ident(String),
+    Ident(intern::Token),
     FatArrow,
     SlimArrow,
 }
@@ -397,9 +408,12 @@ impl<'a> Tokenizer<'a> {
                     {
                         self.advance();
                     }
-                    self.tokens.push(Token::Ident(String::from(
-                        std::str::from_utf8(&self.input[self.start..self.current]).unwrap(),
-                    )));
+                    self.tokens.push(Token::Ident(
+                        intern::intern(
+                            std::str::from_utf8(&self.input[self.start..self.current]).unwrap(),
+                        )
+                        .0,
+                    ));
                 }
             }
         }
@@ -523,7 +537,7 @@ impl Parser {
 fn main() {
     let mut ctx = HashMap::new();
     ctx.insert(
-        format!("Type"),
+        intern::intern("Type").0,
         (Rc::new(Value::Type), Some(Rc::new(Value::Type))),
     );
     let mut count = 0;
@@ -540,7 +554,7 @@ fn main() {
                 println!("Has Type");
                 println!("{typ:?}");
                 ctx.insert(
-                    format!("val{count}"),
+                    intern::intern(&format!("val{count}")).0,
                     (
                         typ.eval(&ctx_to_env(ctx.clone())),
                         Some(term_out.eval(&ctx_to_env(ctx.clone()))),
@@ -565,11 +579,11 @@ mod test {
         assert_eq!(
             Parser::parse_terms("([t : Type] -> Type) : Type"),
             Some(vec![Rc::new(Term::Annotation(
-                Rc::new(Term::Var(format!("Type"))),
+                Rc::new(Term::Var(intern::intern("Type").0)),
                 Rc::new(Term::FunT(
-                    format!("t"),
-                    Rc::new(Term::Var(format!("Type"))),
-                    Rc::new(Term::Var(format!("Type")))
+                    intern::intern("t").0,
+                    Rc::new(Term::Var(intern::intern("Type").0)),
+                    Rc::new(Term::Var(intern::intern("Type").0))
                 ))
             ))])
         )
