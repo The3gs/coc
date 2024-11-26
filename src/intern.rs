@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::{atomic::AtomicU32, Arc, RwLock},
+    sync::{Arc, RwLock},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -8,23 +8,16 @@ pub struct Token(u32);
 
 impl std::fmt::Debug for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Token({} {:?})",
-            self.0,
-            STRINGS
-                .read()
-                .expect("Should not be poisoned")
-                .1
-                .get(self.0 as usize)
-                .unwrap()
-                .as_ref()
-        )
+        if let Some(s) = self.get_arc() {
+            write!(f, "Token({} {:?})", self.0, s)
+        } else {
+            write!(f, "Token({})", self.0)
+        }
     }
 }
 
 impl Token {
-    pub fn get_arc(&self) -> Arc<str> {
+    pub fn get_arc(&self) -> Option<Arc<str>> {
         STRINGS
             .read()
             .expect("Should not be poisoned")
@@ -35,17 +28,16 @@ impl Token {
     }
 }
 
-static STRINGS: RwLock<(BTreeMap<Arc<str>, Token>, Vec<Arc<str>>)> =
+static STRINGS: RwLock<(BTreeMap<Arc<str>, Token>, Vec<Option<Arc<str>>>)> =
     RwLock::new((BTreeMap::new(), Vec::new()));
 
-static NEXT_TOKEN: AtomicU32 = AtomicU32::new(0);
-
-pub fn intern(s: &str) -> (Token, Arc<str>) {
+/// intern a string, returning a token which can be used consistently in it's place.
+pub fn intern(s: &str) -> Token {
     let lock = STRINGS
         .read()
         .expect("Poisened RwLock on strings interning mechanism");
     if let Some(token) = lock.0.get(s) {
-        (*token, lock.1.get(token.0 as usize).unwrap().clone())
+        *token
     } else {
         drop(lock);
         let mut lock = STRINGS
@@ -53,13 +45,21 @@ pub fn intern(s: &str) -> (Token, Arc<str>) {
             .expect("Poisoned RWLock on strings interning mechanism");
         // We need to check again once we get the write lock to ensure no other accessors were attempting to add this string as well.
         if let Some(token) = lock.0.get(s) {
-            (*token, lock.1.get(token.0 as usize).unwrap().clone())
+            *token
         } else {
-            let token = Token(NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            let token = Token(lock.1.len() as u32);
             let arc: Arc<str> = Arc::from(s);
             lock.0.insert(arc.clone(), token);
-            lock.1.push(arc.clone());
-            (token, arc)
+            lock.1.push(Some(arc));
+            token
         }
     }
+}
+
+/// Creates a unique token, guaranted to be different from all tokens not copied from the original.
+pub fn unique() -> Token {
+    let mut lock = STRINGS.write().unwrap();
+    let token = Token(lock.1.len() as u32);
+    lock.1.push(None);
+    token
 }

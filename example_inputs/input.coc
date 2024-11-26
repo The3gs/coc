@@ -1,0 +1,15 @@
+nat: Type := [T: Type, [T]->T, T] -> T
+zero: nat := [T, f, t] => t
+succ: [nat]->nat := [n] => [T,f,t] => f(n(T, f, t))
+
+succ(succ(succ(zero)))
+
+add: [nat, nat] -> nat := [n, m] => [T, f, t] => n(T, f, m(T, f, t))
+
+add(succ(succ(succ(zero))), succ(succ(succ(zero))))
+
+mult: [nat, nat] -> nat := [n, m] => n(nat, [o]=>add(n, o), zero)
+
+mult(succ(succ(succ(zero))), succ(succ(succ(zero))))
+
+
